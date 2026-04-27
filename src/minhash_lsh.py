@@ -11,6 +11,7 @@ Composition:
 import re
 import random
 import hashlib
+import zlib
 from typing import List, Dict, Set
 
 import numpy as np
@@ -36,7 +37,11 @@ class Shingler:
         out = set()
         k = self.k
         for i in range(max(1, len(text) - k + 1)):
-            out.add(hash(text[i: i + k]) & 0x7FFFFFFF)
+            # zlib.crc32 is deterministic across processes (unlike built-in
+            # hash(), which is PYTHONHASHSEED-randomized) — required so the
+            # SON-style parallel builder produces the same signatures as
+            # the serial path.
+            out.add(zlib.crc32(text[i: i + k].encode("utf-8")))
         return out
 
 

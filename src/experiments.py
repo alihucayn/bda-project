@@ -30,6 +30,7 @@ from minhash_lsh import MinHashIndex
 from simhash import SimHashIndex
 from tfidf_baseline import TFIDFIndex
 from base import BaseIndex
+from parallel_indexer import ParallelMinHashBuilder, ParallelSimHashBuilder
 
 
 # ----------------------------------------------------------------------
@@ -347,6 +348,111 @@ class ScalabilityExperiment(BaseExperiment):
 
 
 # ----------------------------------------------------------------------
+# Experiment 4: MapReduce / SON parallel-build speedup
+# ----------------------------------------------------------------------
+
+class MapReduceExperiment(BaseExperiment):
+    """
+    Compare serial vs SON-style parallel index construction.
+
+    For each worker count w ∈ {1,2,4,8}, build the MinHash and SimHash
+    indices using ParallelMinHashBuilder / ParallelSimHashBuilder and
+    record (map_time, reduce_time, total_time, speedup).
+    """
+
+    name = "MapReduce / SON Parallel Build"
+
+    def __init__(self, chunks, plot_dir, queries=None, worker_counts=None,
+                 corpus_multiplier: int = 8):
+        super().__init__(chunks, plot_dir, queries)
+        self.worker_counts = worker_counts or [1, 2, 4, 8]
+        self.corpus_multiplier = corpus_multiplier
+
+    def _scale_corpus(self) -> List[Dict]:
+        """Duplicate the corpus so the parallel speedup is observable."""
+        out, n = [], len(self.chunks)
+        for i in range(self.corpus_multiplier):
+            for c in self.chunks:
+                nc = c.copy()
+                nc["chunk_id"] = c["chunk_id"] + i * n
+                out.append(nc)
+        return out
+
+    def run(self) -> Dict:
+        big = self._scale_corpus()
+        print(f"  scaled corpus: {len(big)} chunks "
+              f"({self.corpus_multiplier}× original)")
+
+        mh_total, mh_map, mh_red = [], [], []
+        sh_total, sh_map, sh_red = [], [], []
+
+        for nw in self.worker_counts:
+            _, mh_stats = ParallelMinHashBuilder(n_workers=nw).build(big)
+            _, sh_stats = ParallelSimHashBuilder(n_workers=nw).build(big)
+
+            mh_total.append(mh_stats["total_time_s"])
+            mh_map.append(mh_stats["map_time_s"])
+            mh_red.append(mh_stats["reduce_time_s"])
+
+            sh_total.append(sh_stats["total_time_s"])
+            sh_map.append(sh_stats["map_time_s"])
+            sh_red.append(sh_stats["reduce_time_s"])
+
+            print(f"  workers={nw:2d}  MinHash: map={mh_stats['map_time_s']:.2f}s "
+                  f"reduce={mh_stats['reduce_time_s']:.2f}s "
+                  f"total={mh_stats['total_time_s']:.2f}s  |  "
+                  f"SimHash total={sh_stats['total_time_s']:.2f}s")
+
+        # Speedup vs serial (workers=1)
+        mh_speedup = [mh_total[0] / t if t > 0 else 0 for t in mh_total]
+        sh_speedup = [sh_total[0] / t if t > 0 else 0 for t in sh_total]
+
+        return {
+            "corpus_size": len(big),
+            "worker_counts": self.worker_counts,
+            "minhash": {
+                "map_time_s": mh_map, "reduce_time_s": mh_red,
+                "total_time_s": mh_total, "speedup": [round(s, 3) for s in mh_speedup],
+            },
+            "simhash": {
+                "map_time_s": sh_map, "reduce_time_s": sh_red,
+                "total_time_s": sh_total, "speedup": [round(s, 3) for s in sh_speedup],
+            },
+        }
+
+    def plot(self) -> None:
+        r = self.results
+        w = r["worker_counts"]
+
+        fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+        # Build time
+        axes[0].plot(w, r["minhash"]["total_time_s"], "o-", color="coral", label="MinHash")
+        axes[0].plot(w, r["simhash"]["total_time_s"], "s-", color="mediumseagreen", label="SimHash")
+        axes[0].set_xlabel("Number of Workers")
+        axes[0].set_ylabel("Total Build Time (s)")
+        axes[0].set_title(f"SON Parallel Build — {r['corpus_size']} chunks")
+        axes[0].set_xticks(w)
+        axes[0].legend()
+        axes[0].grid(alpha=0.3)
+
+        # Speedup
+        axes[1].plot(w, r["minhash"]["speedup"], "o-", color="coral", label="MinHash")
+        axes[1].plot(w, r["simhash"]["speedup"], "s-", color="mediumseagreen", label="SimHash")
+        axes[1].plot(w, w, "k--", alpha=0.4, label="Ideal (linear)")
+        axes[1].set_xlabel("Number of Workers")
+        axes[1].set_ylabel("Speedup vs Serial")
+        axes[1].set_title("MapReduce Speedup")
+        axes[1].set_xticks(w)
+        axes[1].legend()
+        axes[1].grid(alpha=0.3)
+
+        plt.tight_layout()
+        plt.savefig(self.plot_dir / "exp4_mapreduce.png", dpi=150)
+        plt.close()
+
+
+# ----------------------------------------------------------------------
 # Orchestrator
 # ----------------------------------------------------------------------
 
@@ -373,6 +479,7 @@ class ExperimentRunner:
             ExactVsApproxExperiment(chunks, self.plot_dir),
             ParameterSensitivityExperiment(chunks, self.plot_dir),
             ScalabilityExperiment(chunks, self.plot_dir),
+            MapReduceExperiment(chunks, self.plot_dir),
         ]
 
         all_results = {}

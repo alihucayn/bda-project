@@ -3,7 +3,6 @@ Answer generation (Strategy pattern).
 
 Concrete strategies:
   ExtractiveAnswerer  - pick the most query-relevant sentences from top chunks
-  LLMAnswerer         - call Claude API with retrieved chunks as context
   GroqAnswerer        - call Groq API (Llama) with retrieved chunks as context
 
 A factory `make_answerer(mode)` builds the right strategy by name.
@@ -49,69 +48,6 @@ class ExtractiveAnswerer(BaseAnswerer):
 
 
 # ----------------------------------------------------------------------
-# LLM strategy
-# ----------------------------------------------------------------------
-
-class LLMAnswerer(BaseAnswerer):
-    """Call the Anthropic Claude API to generate a grounded answer."""
-
-    name = "llm"
-
-    def __init__(
-        self,
-        model: str = "claude-haiku-4-5-20251001",
-        max_tokens: int = 512,
-        api_key: str = None,
-        fallback: BaseAnswerer = None,
-    ):
-        self.model = model
-        self.max_tokens = max_tokens
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
-        self.fallback = fallback or ExtractiveAnswerer()
-
-    def _build_context(self, chunks: List[Dict]) -> str:
-        parts = []
-        for i, chunk in enumerate(chunks[:5], 1):
-            ref = f"[Pages {chunk['start_page']}–{chunk['end_page']}]"
-            parts.append(f"--- Chunk {i} {ref} ---\n{chunk['text']}")
-        return "\n\n".join(parts)
-
-    def answer(self, query: str, chunks: List[Dict]) -> str:
-        if not self.api_key:
-            return self.fallback.answer(query, chunks)
-
-        try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=self.api_key)
-
-            system_prompt = (
-                "You are a helpful assistant for NUST students. "
-                "Answer the student's question STRICTLY based on the provided handbook excerpts. "
-                "If the answer is not in the excerpts, say so. "
-                "Be concise and cite the page numbers."
-            )
-            user_message = (
-                f"HANDBOOK EXCERPTS:\n{self._build_context(chunks)}\n\n"
-                f"STUDENT QUESTION: {query}\n\n"
-                "Answer based only on the excerpts above:"
-            )
-
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_message}],
-            )
-            return response.content[0].text
-
-        except Exception as e:
-            return (
-                f"[LLM error: {e}] Falling back to extractive answer.\n\n"
-                + self.fallback.answer(query, chunks)
-            )
-
-
-# ----------------------------------------------------------------------
 # Groq + Llama strategy
 # ----------------------------------------------------------------------
 
@@ -126,17 +62,21 @@ class GroqAnswerer(BaseAnswerer):
         max_tokens: int = 512,
         api_key: str = None,
         fallback: BaseAnswerer = None,
+        max_context_chunks: int = 5,
     ):
         self.model = model
         self.max_tokens = max_tokens
         self.api_key = api_key or os.environ.get("GROQ_API_KEY", "")
         self.fallback = fallback or ExtractiveAnswerer()
+        self.max_context_chunks = max_context_chunks
 
     def _build_context(self, chunks: List[Dict]) -> str:
+        n = min(self.max_context_chunks, len(chunks))
         parts = []
-        for i, chunk in enumerate(chunks[:5], 1):
+        for i, chunk in enumerate(chunks[:n], 1):
             ref = f"[Pages {chunk['start_page']}–{chunk['end_page']}]"
-            parts.append(f"--- Chunk {i} {ref} ---\n{chunk['text']}")
+            src = f" ({chunk['source']})" if chunk.get("source") else ""
+            parts.append(f"--- Chunk {i} {ref}{src} ---\n{chunk['text']}")
         return "\n\n".join(parts)
 
     def answer(self, query: str, chunks: List[Dict]) -> str:
@@ -182,7 +122,6 @@ class GroqAnswerer(BaseAnswerer):
 
 _ANSWERERS = {
     "extractive": ExtractiveAnswerer,
-    "llm": LLMAnswerer,
     "groq": GroqAnswerer,
 }
 

@@ -70,6 +70,7 @@ class BaseAnswerer(ABC):
                 "section": c.get("section", ""),
                 "score": c.get("score", 0),
                 "method": c.get("method", ""),
+                "source": c.get("source", ""),
             })
         return {
             "answer": text,
